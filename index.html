@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
+<title>문서 스캐너</title>
+<meta name="theme-color" content="#171513">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="스캐너">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#171513;
+    --surface:#211e1b;
+    --surface-2:#2a2622;
+    --paper:#faf6ee;
+    --ink:#f2ede2;
+    --ink-dim:#9a9186;
+    --line: rgba(242,237,226,0.10);
+    --accent:#33d7ae;
+    --accent-ink:#0a2420;
+    --warn:#e8a33d;
+    --danger:#e2604c;
+    --radius: 3px;
+    --font-display:'Barlow Condensed', sans-serif;
+    --font-body:'Public Sans', sans-serif;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--font-body);
+    overscroll-behavior:none; user-select:none;
+    height:100dvh; display:flex; flex-direction:column;
+  }
+  button{font-family:inherit; border:none; background:none; color:inherit; cursor:pointer;}
+
+  header{
+    display:flex; align-items:baseline; justify-content:space-between;
+    padding:14px 18px 10px; flex:0 0 auto;
+    border-bottom:1px solid var(--line);
+  }
+  header h1{
+    font-family:var(--font-display); font-weight:600; font-size:22px;
+    letter-spacing:0.2px; margin:0; color:var(--ink);
+  }
+  header .count{
+    font-family:var(--font-display); font-size:16px; color:var(--accent);
+    font-weight:600;
+  }
+
+  main{flex:1 1 auto; position:relative; min-height:0; background:#000;}
+
+  /* ---- Camera view ---- */
+  #cameraView{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden;}
+  #video{width:100%; height:100%; object-fit:cover; display:block;}
+  .viewfinder{position:absolute; inset:24px; pointer-events:none;}
+  .viewfinder i{
+    position:absolute; width:26px; height:26px;
+    border-color:rgba(242,237,226,0.55);
+    border-style:solid; border-width:0;
+  }
+  .viewfinder i.tl{top:0;left:0;border-top-width:2px;border-left-width:2px;}
+  .viewfinder i.tr{top:0;right:0;border-top-width:2px;border-right-width:2px;}
+  .viewfinder i.bl{bottom:0;left:0;border-bottom-width:2px;border-left-width:2px;}
+  .viewfinder i.br{bottom:0;right:0;border-bottom-width:2px;border-right-width:2px;}
+  #camStatus{
+    position:absolute; left:0; right:0; bottom:14px; text-align:center;
+    font-size:13px; color:var(--ink-dim); letter-spacing:0.2px;
+  }
+
+  /* ---- Review / crop view ---- */
+  #reviewView{position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:#000;}
+  #reviewStage{position:relative; max-width:100%; max-height:100%; line-height:0;}
+  #reviewImg{display:block; max-width:100vw; max-height:calc(100dvh - 220px); width:auto; height:auto;}
+  #cropSvg{position:absolute; inset:0; width:100%; height:100%; touch-action:none;}
+  #cropSvg polygon{fill:rgba(51,215,174,0.16); stroke:var(--accent); stroke-width:3; vector-effect:non-scaling-stroke;}
+  #cropSvg circle{fill:var(--accent); stroke:var(--paper); stroke-width:2; vector-effect:non-scaling-stroke; cursor:grab;}
+
+  #filterRow{
+    display:none; gap:8px; padding:10px 18px 0; flex:0 0 auto; justify-content:center;
+  }
+  #filterRow button{
+    font-family:var(--font-display); font-size:14px; font-weight:600;
+    padding:7px 16px; border-radius:var(--radius);
+    border:1px solid var(--line); color:var(--ink-dim);
+  }
+  #filterRow button.active{color:var(--accent-ink); background:var(--accent); border-color:var(--accent);}
+
+  /* ---- Filmstrip ---- */
+  #filmstrip{
+    flex:0 0 auto; display:flex; gap:8px; padding:10px 14px;
+    overflow-x:auto; background:var(--surface); border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line);
+  }
+  #filmstrip:empty{display:none;}
+  .thumb{
+    position:relative; flex:0 0 auto; width:46px; height:62px;
+    border-radius:2px; overflow:hidden; border:1px solid var(--line);
+    background:var(--paper);
+  }
+  .thumb img{width:100%; height:100%; object-fit:cover; display:block;}
+  .thumb .n{
+    position:absolute; left:2px; bottom:2px; font-family:var(--font-display);
+    font-size:10px; background:rgba(0,0,0,0.55); color:var(--ink);
+    padding:0 3px; border-radius:1px;
+  }
+  .thumb .x{
+    position:absolute; top:0; right:0; width:16px; height:16px;
+    background:rgba(0,0,0,0.6); color:var(--ink); font-size:11px;
+    display:flex; align-items:center; justify-content:center;
+  }
+
+  /* ---- Controls ---- */
+  footer{
+    flex:0 0 auto; padding:16px 18px calc(18px + env(safe-area-inset-bottom));
+    display:flex; align-items:center; justify-content:space-between; gap:14px;
+    background:var(--bg);
+  }
+  .ghostBtn{
+    font-family:var(--font-display); font-size:15px; font-weight:600;
+    color:var(--ink-dim); padding:10px 6px; min-width:64px;
+  }
+  .ghostBtn.warn{color:var(--danger);}
+  .shutter{
+    width:68px; height:68px; border-radius:50%;
+    border:3px solid var(--ink); background:transparent;
+    display:flex; align-items:center; justify-content:center;
+    flex:0 0 auto;
+  }
+  .shutter::after{content:''; width:54px; height:54px; border-radius:50%; background:var(--ink);}
+  .shutter:active::after{background:var(--accent);}
+  .primaryBtn{
+    font-family:var(--font-display); font-size:15px; font-weight:600;
+    color:var(--accent-ink); background:var(--accent);
+    padding:11px 20px; border-radius:var(--radius); min-width:64px; text-align:center;
+  }
+  .primaryBtn:disabled{opacity:0.35;}
+
+  /* ---- Finished overlay ---- */
+  #doneOverlay{
+    position:fixed; inset:0; background:rgba(10,9,8,0.92); z-index:20;
+    display:none; align-items:center; justify-content:center; flex-direction:column; gap:18px;
+    padding:24px; text-align:center;
+  }
+  #doneOverlay h2{font-family:var(--font-display); font-size:26px; font-weight:600; margin:0;}
+  #doneOverlay p{color:var(--ink-dim); margin:0; font-size:14px; max-width:280px;}
+  #doneOverlay .row{display:flex; gap:10px;}
+
+  #toast{
+    position:fixed; left:50%; bottom:110px; transform:translateX(-50%);
+    background:var(--surface-2); color:var(--ink); padding:9px 16px;
+    border-radius:var(--radius); font-size:13px; border:1px solid var(--line);
+    opacity:0; pointer-events:none; transition:opacity .2s; z-index:30;
+  }
+  #toast.show{opacity:1;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>문서 스캐너</h1>
+  <span class="count" id="pageCount"></span>
+</header>
+
+<main>
+  <div id="cameraView">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="viewfinder"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+    <div id="camStatus">카메라를 문서 위에 맞춰주세요</div>
+  </div>
+
+  <div id="reviewView">
+    <div id="reviewStage">
+      <img id="reviewImg" alt="촬영된 문서">
+      <svg id="cropSvg" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+</main>
+
+<div id="filterRow">
+  <button data-mode="bw" class="active">흑백 스캔</button>
+  <button data-mode="gray">그레이스케일</button>
+  <button data-mode="color">컬러</button>
+</div>
+
+<div id="filmstrip"></div>
+
+<footer id="camFooter">
+  <span class="ghostBtn" style="visibility:hidden">닫기</span>
+  <button class="shutter" id="shutterBtn" aria-label="촬영"></button>
+  <button class="primaryBtn" id="finishBtn" disabled>완료</button>
+</footer>
+
+<footer id="reviewFooter" style="display:none">
+  <button class="ghostBtn warn" id="retakeBtn">다시 찍기</button>
+  <button class="primaryBtn" id="confirmBtn">이 페이지 저장</button>
+</footer>
+
+<div id="doneOverlay">
+  <h2>PDF 준비 완료</h2>
+  <p id="doneSummary"></p>
+  <div class="row">
+    <button class="ghostBtn" id="backToCamBtn">계속 촬영</button>
+    <button class="primaryBtn" id="savePdfBtn">PDF 저장</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<canvas id="workCanvas" style="display:none"></canvas>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+  // ---------- state ----------
+  const pages = [];               // { thumb, full } canvases (processed, final)
+  let stream = null;
+  let rawCanvas = null;            // full-res captured frame, before crop
+  let corners = null;              // {tl,tr,br,bl} in rawCanvas pixel space
+  let filterMode = 'bw';
+  let cvReady = false;
+  let dragIndex = null;
+
+  const el = id => document.getElementById(id);
+  const cameraView = el('cameraView'), reviewView = el('reviewView');
+  const camFooter = el('camFooter'), reviewFooter = el('reviewFooter');
+  const filterRow = el('filterRow'), filmstrip = el('filmstrip');
+  const video = el('video'), reviewImg = el('reviewImg'), cropSvg = el('cropSvg');
+  const pageCountEl = el('pageCount');
+  const workCanvas = el('workCanvas');
+
+  function toast(msg){
+    const t = el('toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toast._h); toast._h = setTimeout(()=>t.classList.remove('show'), 1800);
+  }
+
+  // ---------- opencv ----------
+  window.onOpenCvReady = function(){ cvReady = true; };
+  const cvScript = document.createElement('script');
+  cvScript.src = 'https://docs.opencv.org/4.9.0/opencv.js';
+  cvScript.onload = () => { if (window.cv && cv.getBuildInformation) cvReady = true; else if(window.cv) cv['onRuntimeInitialized']=()=>{cvReady=true;}; };
+  document.head.appendChild(cvScript);
+
+  // ---------- camera ----------
+  async function startCamera(){
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width:{ideal:1920}, height:{ideal:1080} },
+        audio:false
+      });
+      video.srcObject = stream;
+    }catch(err){
+      el('camStatus').textContent = '카메라를 사용할 수 없어요. 브라우저 설정에서 카메라 접근을 허용해주세요.';
+    }
+  }
+  startCamera();
+
+  // ---------- capture ----------
+  el('shutterBtn').addEventListener('click', () => {
+    if (!video.videoWidth) return;
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    rawCanvas = c;
+    enterReview();
+  });
+
+  function enterReview(){
+    cameraView.style.display = 'none';
+    reviewView.style.display = 'flex';
+    camFooter.style.display = 'none';
+    reviewFooter.style.display = 'flex';
+    filterRow.style.display = 'flex';
+    reviewImg.src = rawCanvas.toDataURL('image/jpeg', 0.9);
+
+    let detected = cvReady ? detectDocument(rawCanvas) : null;
+    corners = detected || {
+      tl:{x: rawCanvas.width*0.06, y: rawCanvas.height*0.06},
+      tr:{x: rawCanvas.width*0.94, y: rawCanvas.height*0.06},
+      br:{x: rawCanvas.width*0.94, y: rawCanvas.height*0.94},
+      bl:{x: rawCanvas.width*0.06, y: rawCanvas.height*0.94},
+    };
+    if (!detected && cvReady) toast('테두리를 자동으로 찾지 못했어요. 모서리를 직접 옮겨주세요');
+    drawCropOverlay();
+  }
+
+  function exitReviewToCamera(){
+    reviewView.style.display = 'none';
+    cameraView.style.display = 'flex';
+    camFooter.style.display = 'flex';
+    reviewFooter.style.display = 'none';
+    filterRow.style.display = 'none';
+    rawCanvas = null; corners = null;
+  }
+
+  el('retakeBtn').addEventListener('click', exitReviewToCamera);
+
+  // ---------- crop overlay (SVG, coordinate space = raw canvas pixels) ----------
+  function drawCropOverlay(){
+    cropSvg.setAttribute('viewBox', `0 0 ${rawCanvas.width} ${rawCanvas.height}`);
+    const order = ['tl','tr','br','bl'];
+    const ptsAttr = order.map(k => `${corners[k].x},${corners[k].y}`).join(' ');
+    cropSvg.innerHTML = `
+      <polygon points="${ptsAttr}"></polygon>
+      ${order.map((k,i) => `<circle data-k="${k}" cx="${corners[k].x}" cy="${corners[k].y}" r="${rawCanvas.width*0.018}"></circle>`).join('')}
+    `;
+    cropSvg.querySelectorAll('circle').forEach(c => {
+      c.addEventListener('pointerdown', onHandleDown);
+    });
+  }
+
+  function svgPoint(evt){
+    const pt = cropSvg.createSVGPoint();
+    pt.x = evt.clientX; pt.y = evt.clientY;
+    const ctm = cropSvg.getScreenCTM().inverse();
+    return pt.matrixTransform(ctm);
+  }
+
+  function onHandleDown(evt){
+    evt.preventDefault();
+    const key = evt.target.getAttribute('data-k');
+    const move = (e) => {
+      const p = svgPoint(e);
+      corners[key].x = Math.max(0, Math.min(rawCanvas.width, p.x));
+      corners[key].y = Math.max(0, Math.min(rawCanvas.height, p.y));
+      drawCropOverlay();
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+
+  // ---------- auto edge detection ----------
+  function detectDocument(canvas){
+    try{
+      const src = cv.imread(canvas);
+      const gray = new cv.Mat(), blurred = new cv.Mat(), edged = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(gray, blurred, new cv.Size(5,5), 0);
+      cv.Canny(blurred, edged, 50, 150);
+      const kernel = cv.Mat.ones(5,5,cv.CV_8U);
+      cv.dilate(edged, edged, kernel);
+
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(edged, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+      const imgArea = canvas.width * canvas.height;
+      let best = null, bestArea = 0;
+      for (let i=0;i<contours.size();i++){
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area > imgArea*0.15 && area > bestArea){
+          const peri = cv.arcLength(cnt, true);
+          const approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, 0.02*peri, true);
+          if (approx.rows === 4){
+            bestArea = area;
+            best = [];
+            for (let j=0;j<4;j++) best.push({x: approx.data32S[j*2], y: approx.data32S[j*2+1]});
+          }
+          approx.delete();
+        }
+        cnt.delete();
+      }
+      src.delete(); gray.delete(); blurred.delete(); edged.delete();
+      kernel.delete(); contours.delete(); hierarchy.delete();
+
+      if (!best) return null;
+      const sums = best.map(p=>p.x+p.y), diffs = best.map(p=>p.x-p.y);
+      const tl = best[sums.indexOf(Math.min(...sums))];
+      const br = best[sums.indexOf(Math.max(...sums))];
+      const tr = best[diffs.indexOf(Math.max(...diffs))];
+      const bl = best[diffs.indexOf(Math.min(...diffs))];
+      return {tl,tr,br,bl};
+    }catch(e){ return null; }
+  }
+
+  // ---------- perspective warp ----------
+  function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+  function warpDocument(canvas, c){
+    const widthTop = dist(c.tl,c.tr), widthBottom = dist(c.bl,c.br);
+    const heightLeft = dist(c.tl,c.bl), heightRight = dist(c.tr,c.br);
+    const maxW = Math.max(1, Math.round(Math.max(widthTop, widthBottom)));
+    const maxH = Math.max(1, Math.round(Math.max(heightLeft, heightRight)));
+
+    if (!cvReady){
+      // fallback: no perspective correction, just crop bounding box
+      const minX = Math.min(c.tl.x,c.tr.x,c.br.x,c.bl.x), maxX = Math.max(c.tl.x,c.tr.x,c.br.x,c.bl.x);
+      const minY = Math.min(c.tl.y,c.tr.y,c.br.y,c.bl.y), maxY = Math.max(c.tl.y,c.tr.y,c.br.y,c.bl.y);
+      const out = document.createElement('canvas');
+      out.width = maxX-minX; out.height = maxY-minY;
+      out.getContext('2d').drawImage(canvas, minX, minY, out.width, out.height, 0,0,out.width,out.height);
+      return out;
+    }
+
+    const src = cv.imread(canvas);
+    const dst = new cv.Mat();
+    const srcTri = cv.matFromArray(4,1,cv.CV_32FC2,[c.tl.x,c.tl.y,c.tr.x,c.tr.y,c.br.x,c.br.y,c.bl.x,c.bl.y]);
+    const dstTri = cv.matFromArray(4,1,cv.CV_32FC2,[0,0,maxW,0,maxW,maxH,0,maxH]);
+    const M = cv.getPerspectiveTransform(srcTri, dstTri);
+    cv.warpPerspective(src, dst, M, new cv.Size(maxW, maxH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+
+    const out = document.createElement('canvas');
+    cv.imshow(out, dst);
+    src.delete(); dst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
+    return out;
+  }
+
+  function applyFilter(canvas, mode){
+    if (mode === 'color' || !cvReady) return canvas;
+    const src = cv.imread(canvas);
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    const out = document.createElement('canvas');
+    if (mode === 'gray'){
+      cv.imshow(out, gray);
+    } else {
+      const bw = new cv.Mat();
+      cv.adaptiveThreshold(gray, bw, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 15);
+      cv.imshow(out, bw);
+      bw.delete();
+    }
+    src.delete(); gray.delete();
+    return out;
+  }
+
+  // ---------- filter row ----------
+  filterRow.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-mode]');
+    if (!btn) return;
+    filterRow.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    filterMode = btn.dataset.mode;
+  });
+
+  // ---------- confirm page ----------
+  el('confirmBtn').addEventListener('click', () => {
+    const warped = warpDocument(rawCanvas, corners);
+    const final = applyFilter(warped, filterMode);
+    const thumb = document.createElement('canvas');
+    thumb.width = 90; thumb.height = Math.round(90 * final.height/final.width);
+    thumb.getContext('2d').drawImage(final, 0, 0, thumb.width, thumb.height);
+    pages.push({ full: final, thumbUrl: thumb.toDataURL('image/jpeg',0.7) });
+    renderFilmstrip();
+    exitReviewToCamera();
+    toast(`${pages.length}번째 페이지 저장됨`);
+  });
+
+  function renderFilmstrip(){
+    filmstrip.innerHTML = pages.map((p,i) => `
+      <div class="thumb" data-i="${i}">
+        <img src="${p.thumbUrl}">
+        <span class="n">${i+1}</span>
+        <span class="x" data-del="${i}">×</span>
+      </div>
+    `).join('');
+    pageCountEl.textContent = pages.length ? `${pages.length}장` : '';
+    el('finishBtn').disabled = pages.length === 0;
+  }
+
+  filmstrip.addEventListener('click', (e) => {
+    const del = e.target.closest('[data-del]');
+    if (del){
+      pages.splice(Number(del.dataset.del), 1);
+      renderFilmstrip();
+    }
+  });
+
+  // ---------- finish / pdf ----------
+  el('finishBtn').addEventListener('click', () => {
+    if (!pages.length) return;
+    el('doneSummary').textContent = `${pages.length}장을 하나의 PDF로 합쳐요.`;
+    el('doneOverlay').style.display = 'flex';
+  });
+  el('backToCamBtn').addEventListener('click', () => { el('doneOverlay').style.display = 'none'; });
+
+  el('savePdfBtn').addEventListener('click', () => {
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit:'pt', format:'a4' });
+    pages.forEach((p, i) => {
+      if (i>0) pdf.addPage();
+      const c = p.full;
+      const imgData = c.toDataURL('image/jpeg', 0.85);
+      const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight();
+      const margin = 18;
+      const maxW = pageW - margin*2, maxH = pageH - margin*2;
+      const ratio = Math.min(maxW/c.width, maxH/c.height);
+      const w = c.width*ratio, h = c.height*ratio;
+      pdf.addImage(imgData, 'JPEG', (pageW-w)/2, (pageH-h)/2, w, h);
+    });
+    pdf.save(`scan-${Date.now()}.pdf`);
+    toast('PDF 저장 완료');
+  });
+
+  // ---------- pwa ----------
+  if ('serviceWorker' in navigator){
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(()=>{});
+    });
+  }
+</script>
+</body>
+</html>
