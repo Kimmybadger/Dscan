@@ -259,7 +259,7 @@
   // live tracking / auto-capture
   let autoCaptureEnabled = true;
   let trackTimer = null;
-  let prevQuad = null, stableTicks = 0, missTicks = 0;
+  let prevQuad = null, stableTicks = 0, missTicks = 0, autoRetries = 0;
   let capturing = false;
   const DET_W = 320;
 
@@ -323,7 +323,7 @@
   });
 
   // ---------- capture ----------
-  async function doCapture(){
+  async function doCapture(auto = false){
     if (capturing) return;
     capturing = true;
     let c = null;
@@ -367,12 +367,24 @@
       c = scaled;
     }
 
+    if (auto && cvReady && sharpnessScore(c) < SHARPNESS_MIN && autoRetries < AUTO_RETRY_MAX){
+      // The shot came out blurry and we haven't given up yet — discard it
+      // and let live tracking pick back up so it can try again once the
+      // camera actually settles, instead of handing the user a soft photo.
+      autoRetries++;
+      capturing = false;
+      stableTicks = 4; // don't make them hold it fully still all over again
+      el('camStatus').textContent = '초점이 흐려서 다시 시도할게요…';
+      return;
+    }
+
+    autoRetries = 0;
     rawCanvas = c;
     enterReview();
     capturing = false;
   }
 
-  el('shutterBtn').addEventListener('click', doCapture);
+  el('shutterBtn').addEventListener('click', () => doCapture(false));
 
   function enterReview(){
     stopLiveTracking();
@@ -423,7 +435,7 @@
 
   function startLiveTracking(){
     if (trackTimer) return;
-    prevQuad = null; stableTicks = 0; missTicks = 0;
+    prevQuad = null; stableTicks = 0; missTicks = 0; autoRetries = 0;
     trackTimer = setInterval(trackTick, 260);
   }
 
@@ -431,7 +443,7 @@
     clearInterval(trackTimer);
     trackTimer = null;
     liveTrackSvg.innerHTML = '';
-    prevQuad = null; stableTicks = 0; missTicks = 0;
+    prevQuad = null; stableTicks = 0; missTicks = 0; autoRetries = 0;
   }
 
   document.addEventListener('visibilitychange', () => {
@@ -488,10 +500,10 @@
 
     el('camStatus').textContent = stableTicks >= 2 ? '문서 고정 중…' : '문서를 감지했어요';
 
-    if (autoCaptureEnabled && stableTicks >= 3){
+    if (autoCaptureEnabled && stableTicks >= 6){
       stableTicks = 0; prevQuad = null; missTicks = 0;
       el('camStatus').textContent = '촬영!';
-      doCapture();
+      doCapture(true);
     }
   }
 
@@ -568,6 +580,37 @@
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   }
+
+  // ---------- focus check ----------
+  // There is no API on iOS Safari that reports whether the camera's
+  // autofocus has actually locked, so we measure it directly: resize to a
+  // fixed width (so the score isn't skewed by capture resolution) and take
+  // the variance of the Laplacian — a standard blur metric. Sharp images
+  // have a lot of fine edge detail and score high; blurry ones score low.
+  function sharpnessScore(canvas){
+    try{
+      const FIX_W = 640;
+      const scale = FIX_W / canvas.width;
+      const tmp = document.createElement('canvas');
+      tmp.width = FIX_W; tmp.height = Math.max(1, Math.round(canvas.height * scale));
+      tmp.getContext('2d').drawImage(canvas, 0, 0, tmp.width, tmp.height);
+
+      const src = cv.imread(tmp);
+      const gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const lap = new cv.Mat();
+      cv.Laplacian(gray, lap, cv.CV_64F);
+      const mean = new cv.Mat(), stddev = new cv.Mat();
+      cv.meanStdDev(lap, mean, stddev);
+      const variance = stddev.data64F[0] * stddev.data64F[0];
+      src.delete(); gray.delete(); lap.delete(); mean.delete(); stddev.delete();
+      return variance;
+    }catch(e){ return Infinity; } // scoring failure should never block a capture
+  }
+  // Tune this if needed: raise it if blurry shots still get accepted, lower
+  // it if sharp shots keep getting rejected/retried.
+  const SHARPNESS_MIN = 40;
+  const AUTO_RETRY_MAX = 2;
 
   // ---------- auto edge detection ----------
   function rotatedRectCorners(rect){
