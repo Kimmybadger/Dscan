@@ -60,6 +60,12 @@
   /* ---- Camera view ---- */
   #cameraView{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; overflow:hidden;}
   #video{width:100%; height:100%; object-fit:cover; display:block;}
+  #liveTrackSvg{position:absolute; inset:0; width:100%; height:100%; pointer-events:none;}
+  #liveTrackSvg polygon{
+    fill:rgba(51,215,174,0.10); stroke:var(--accent); stroke-width:3;
+    vector-effect:non-scaling-stroke; transition:stroke 0.15s;
+  }
+  #liveTrackSvg polygon.locking{stroke:#8bffe0; stroke-width:5;}
   .viewfinder{position:absolute; inset:24px; pointer-events:none;}
   .viewfinder i{
     position:absolute; width:26px; height:26px;
@@ -70,10 +76,17 @@
   .viewfinder i.tr{top:0;right:0;border-top-width:2px;border-right-width:2px;}
   .viewfinder i.bl{bottom:0;left:0;border-bottom-width:2px;border-left-width:2px;}
   .viewfinder i.br{bottom:0;right:0;border-bottom-width:2px;border-right-width:2px;}
-  #camStatus{
-    position:absolute; left:0; right:0; bottom:14px; text-align:center;
-    font-size:13px; color:var(--ink-dim); letter-spacing:0.2px;
+  #camStatusRow{
+    position:absolute; left:0; right:0; bottom:14px;
+    display:flex; flex-direction:column; align-items:center; gap:8px;
   }
+  #camStatus{font-size:13px; color:var(--ink-dim); letter-spacing:0.2px; text-align:center;}
+  #autoToggle{
+    font-family:var(--font-display); font-size:13px; font-weight:600;
+    padding:5px 12px; border-radius:var(--radius);
+    border:1px solid var(--line); color:var(--ink-dim);
+  }
+  #autoToggle.active{color:var(--accent-ink); background:var(--accent); border-color:var(--accent);}
 
   /* ---- Review / crop view ---- */
   #reviewView{position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:#000;}
@@ -172,8 +185,12 @@
 <main>
   <div id="cameraView">
     <video id="video" autoplay playsinline muted></video>
+    <svg id="liveTrackSvg" preserveAspectRatio="none"></svg>
     <div class="viewfinder"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
-    <div id="camStatus">카메라를 문서 위에 맞춰주세요</div>
+    <div id="camStatusRow">
+      <span id="camStatus">카메라를 문서 위에 맞춰주세요</span>
+      <button id="autoToggle" class="active">자동 촬영 켬</button>
+    </div>
   </div>
 
   <div id="reviewView">
@@ -227,11 +244,19 @@
   let cvReady = false;
   let dragIndex = null;
 
+  // live tracking / auto-capture
+  let autoCaptureEnabled = true;
+  let trackTimer = null;
+  let prevQuad = null, stableTicks = 0;
+  let capturing = false;
+  const DET_W = 240;
+
   const el = id => document.getElementById(id);
   const cameraView = el('cameraView'), reviewView = el('reviewView');
   const camFooter = el('camFooter'), reviewFooter = el('reviewFooter');
   const filterRow = el('filterRow'), filmstrip = el('filmstrip');
   const video = el('video'), reviewImg = el('reviewImg'), cropSvg = el('cropSvg');
+  const liveTrackSvg = el('liveTrackSvg'), autoToggle = el('autoToggle');
   const pageCountEl = el('pageCount');
   const workCanvas = el('workCanvas');
 
@@ -255,14 +280,23 @@
         audio:false
       });
       video.srcObject = stream;
+      video.addEventListener('loadedmetadata', () => startLiveTracking(), { once:true });
     }catch(err){
       el('camStatus').textContent = '카메라를 사용할 수 없어요. 브라우저 설정에서 카메라 접근을 허용해주세요.';
     }
   }
   startCamera();
 
+  autoToggle.addEventListener('click', () => {
+    autoCaptureEnabled = !autoCaptureEnabled;
+    autoToggle.classList.toggle('active', autoCaptureEnabled);
+    autoToggle.textContent = autoCaptureEnabled ? '자동 촬영 켬' : '자동 촬영 끔';
+  });
+
   // ---------- capture ----------
-  el('shutterBtn').addEventListener('click', async () => {
+  async function doCapture(){
+    if (capturing) return;
+    capturing = true;
     let c = null;
 
     // Prefer a full-resolution still photo (usually much sharper than the
@@ -282,7 +316,7 @@
 
     // Fallback: grab the current video frame (works everywhere, including iOS Safari).
     if (!c) {
-      if (!video.videoWidth) return;
+      if (!video.videoWidth) { capturing = false; return; }
       c = document.createElement('canvas');
       c.width = video.videoWidth; c.height = video.videoHeight;
       c.getContext('2d').drawImage(video, 0, 0);
@@ -290,9 +324,13 @@
 
     rawCanvas = c;
     enterReview();
-  });
+    capturing = false;
+  }
+
+  el('shutterBtn').addEventListener('click', doCapture);
 
   function enterReview(){
+    stopLiveTracking();
     cameraView.style.display = 'none';
     reviewView.style.display = 'flex';
     camFooter.style.display = 'none';
@@ -318,6 +356,80 @@
     reviewFooter.style.display = 'none';
     filterRow.style.display = 'none';
     rawCanvas = null; corners = null;
+    startLiveTracking();
+  }
+
+  // ---------- live tracking + auto-capture ----------
+  function computeVisibleCrop(){
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const cw = cameraView.clientWidth, ch = cameraView.clientHeight;
+    const videoAspect = vw / vh, containerAspect = cw / ch;
+    let sx, sy, sw, sh;
+    if (videoAspect > containerAspect){
+      sh = vh; sw = vh * containerAspect; sy = 0; sx = (vw - sw) / 2;
+    } else {
+      sw = vw; sh = vw / containerAspect; sx = 0; sy = (vh - sh) / 2;
+    }
+    return { sx, sy, sw, sh };
+  }
+
+  function startLiveTracking(){
+    if (trackTimer) return;
+    prevQuad = null; stableTicks = 0;
+    trackTimer = setInterval(trackTick, 260);
+  }
+
+  function stopLiveTracking(){
+    clearInterval(trackTimer);
+    trackTimer = null;
+    liveTrackSvg.innerHTML = '';
+    prevQuad = null; stableTicks = 0;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopLiveTracking();
+    else if (cameraView.style.display !== 'none') startLiveTracking();
+  });
+
+  function trackTick(){
+    if (!cvReady || !video.videoWidth || capturing) return;
+
+    const { sx, sy, sw, sh } = computeVisibleCrop();
+    const detH = Math.round(DET_W * (sh / sw));
+    workCanvas.width = DET_W; workCanvas.height = detH;
+    workCanvas.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, DET_W, detH);
+
+    const quad = detectDocument(workCanvas);
+    const diag = Math.hypot(DET_W, detH);
+
+    if (!quad){
+      liveTrackSvg.innerHTML = '';
+      prevQuad = null; stableTicks = 0;
+      el('camStatus').textContent = '카메라를 문서 위에 맞춰주세요';
+      return;
+    }
+
+    const order = ['tl','tr','br','bl'];
+    let moved = 0;
+    if (prevQuad){
+      moved = order.reduce((s,k) => s + Math.hypot(quad[k].x-prevQuad[k].x, quad[k].y-prevQuad[k].y), 0) / 4;
+    }
+    const isStableFrame = prevQuad && (moved / diag) < 0.02;
+    stableTicks = isStableFrame ? stableTicks + 1 : 1;
+    prevQuad = quad;
+
+    liveTrackSvg.setAttribute('viewBox', `0 0 ${DET_W} ${detH}`);
+    const pts = order.map(k => `${quad[k].x},${quad[k].y}`).join(' ');
+    const locking = stableTicks >= 2 ? 'locking' : '';
+    liveTrackSvg.innerHTML = `<polygon class="${locking}" points="${pts}"></polygon>`;
+
+    el('camStatus').textContent = stableTicks >= 2 ? '문서 고정 중…' : '문서를 감지했어요';
+
+    if (autoCaptureEnabled && stableTicks >= 3){
+      stableTicks = 0; prevQuad = null;
+      el('camStatus').textContent = '촬영!';
+      doCapture();
+    }
   }
 
   el('retakeBtn').addEventListener('click', exitReviewToCamera);
@@ -438,21 +550,41 @@
     return out;
   }
 
+  // Corrects uneven lighting/shadows by dividing the image by a heavily
+  // blurred estimate of its own background illumination ("flat-fielding") —
+  // this is what makes a shadowed corner of a page look evenly lit.
+  function flattenIllumination(gray){
+    const bg = new cv.Mat();
+    let k = Math.round(Math.min(gray.cols, gray.rows) / 8);
+    if (k < 25) k = 25; if (k > 151) k = 151; if (k % 2 === 0) k++;
+    cv.GaussianBlur(gray, bg, new cv.Size(k, k), 0);
+
+    const grayF = new cv.Mat(), bgF = new cv.Mat(), normF = new cv.Mat(), out = new cv.Mat();
+    gray.convertTo(grayF, cv.CV_32F);
+    bg.convertTo(bgF, cv.CV_32F, 1, 1); // +1 avoids divide-by-zero
+    cv.divide(grayF, bgF, normF, 255);
+    normF.convertTo(out, cv.CV_8U);
+
+    bg.delete(); grayF.delete(); bgF.delete(); normF.delete();
+    return out; // caller must delete
+  }
+
   function applyFilter(canvas, mode){
     if (mode === 'color' || !cvReady) return canvas;
     const src = cv.imread(canvas);
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    const flat = flattenIllumination(gray);
     const out = document.createElement('canvas');
     if (mode === 'gray'){
-      cv.imshow(out, gray);
+      cv.imshow(out, flat);
     } else {
       const bw = new cv.Mat();
-      cv.adaptiveThreshold(gray, bw, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 15);
+      cv.adaptiveThreshold(flat, bw, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 15);
       cv.imshow(out, bw);
       bw.delete();
     }
-    src.delete(); gray.delete();
+    src.delete(); gray.delete(); flat.delete();
     return out;
   }
 
