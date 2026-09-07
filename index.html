@@ -288,17 +288,32 @@
   // ---------- camera ----------
   async function startCamera(){
     try{
+      if (stream){ try{ stream.getTracks().forEach(t => t.stop()); }catch(e){} }
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width:{ideal:4096}, height:{ideal:2160} },
         audio:false
       });
       video.srcObject = stream;
+      await video.play().catch(()=>{});
       video.addEventListener('loadedmetadata', () => startLiveTracking(), { once:true });
     }catch(err){
       el('camStatus').textContent = '카메라를 사용할 수 없어요. 브라우저 설정에서 카메라 접근을 허용해주세요.';
     }
   }
   startCamera();
+
+  // iOS standalone(홈 화면 앱) 모드에서는 카메라 화면이 잠시 가려졌다 돌아오면
+  // 트랙이 죽은 채로 남는 경우가 있어, 돌아올 때마다 살아있는지 확인하고
+  // 죽어 있으면 스트림을 통째로 다시 받아온다.
+  async function ensureCameraAlive(){
+    const track = stream && stream.getVideoTracks()[0];
+    const dead = !track || track.readyState !== 'live' || video.videoWidth === 0;
+    if (dead){
+      await startCamera();
+    } else if (video.paused) {
+      await video.play().catch(()=>{});
+    }
+  }
 
   autoToggle.addEventListener('click', () => {
     autoCaptureEnabled = !autoCaptureEnabled;
@@ -344,7 +359,8 @@
 
   function enterReview(){
     stopLiveTracking();
-    cameraView.style.display = 'none';
+    cameraView.style.visibility = 'hidden';
+    cameraView.style.pointerEvents = 'none';
     reviewView.style.display = 'flex';
     camFooter.style.display = 'none';
     reviewFooter.style.display = 'flex';
@@ -362,13 +378,15 @@
     drawCropOverlay();
   }
 
-  function exitReviewToCamera(){
+  async function exitReviewToCamera(){
     reviewView.style.display = 'none';
-    cameraView.style.display = 'flex';
+    cameraView.style.visibility = 'visible';
+    cameraView.style.pointerEvents = 'auto';
     camFooter.style.display = 'flex';
     reviewFooter.style.display = 'none';
     filterRow.style.display = 'none';
     rawCanvas = null; corners = null;
+    await ensureCameraAlive();
     startLiveTracking();
   }
 
@@ -400,8 +418,19 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopLiveTracking();
-    else if (cameraView.style.display !== 'none') startLiveTracking();
+    if (document.hidden) {
+      stopLiveTracking();
+    } else if (cameraView.style.visibility !== 'hidden') {
+      ensureCameraAlive().then(startLiveTracking);
+    }
+  });
+
+  // Extra safety net: iOS sometimes restores a standalone app via 'pageshow'
+  // (bfcache) rather than a plain visibilitychange.
+  window.addEventListener('pageshow', () => {
+    if (cameraView.style.visibility !== 'hidden') {
+      ensureCameraAlive().then(startLiveTracking);
+    }
   });
 
   function trackTick(){
