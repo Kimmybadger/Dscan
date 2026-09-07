@@ -397,7 +397,7 @@
     try{
       if (stream){ try{ stream.getTracks().forEach(t => t.stop()); }catch(e){} }
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width:{ideal:4096}, height:{ideal:2160} },
+        video: { facingMode: { ideal: 'environment' }, width:{ideal:1920}, height:{ideal:1080} },
         audio:false
       });
       video.srcObject = stream;
@@ -455,6 +455,22 @@
       c = document.createElement('canvas');
       c.width = video.videoWidth; c.height = video.videoHeight;
       c.getContext('2d').drawImage(video, 0, 0);
+    }
+
+    // Cap processing resolution: modern iPhone sensors (12MP+) are far more
+    // than OpenCV's perspective-warp + flat-fielding steps need, and keeping
+    // several huge float32 Mats alive at once causes iOS Safari to silently
+    // purge large canvas backing stores — which is what makes the loupe and
+    // the saved PDF turn solid black. 2400px on the long edge is still very
+    // sharp for reading documents while staying well within safe memory.
+    const MAX_DIM = 2400;
+    if (Math.max(c.width, c.height) > MAX_DIM) {
+      const scale = MAX_DIM / Math.max(c.width, c.height);
+      const scaled = document.createElement('canvas');
+      scaled.width = Math.round(c.width * scale);
+      scaled.height = Math.round(c.height * scale);
+      scaled.getContext('2d').drawImage(c, 0, 0, scaled.width, scaled.height);
+      c = scaled;
     }
 
     rawCanvas = c;
