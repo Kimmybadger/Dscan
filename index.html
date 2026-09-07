@@ -259,7 +259,7 @@
   // live tracking / auto-capture
   let autoCaptureEnabled = true;
   let trackTimer = null;
-  let prevQuad = null, stableTicks = 0;
+  let prevQuad = null, stableTicks = 0, missTicks = 0;
   let capturing = false;
   const DET_W = 240;
 
@@ -406,7 +406,7 @@
 
   function startLiveTracking(){
     if (trackTimer) return;
-    prevQuad = null; stableTicks = 0;
+    prevQuad = null; stableTicks = 0; missTicks = 0;
     trackTimer = setInterval(trackTick, 260);
   }
 
@@ -414,7 +414,7 @@
     clearInterval(trackTimer);
     trackTimer = null;
     liveTrackSvg.innerHTML = '';
-    prevQuad = null; stableTicks = 0;
+    prevQuad = null; stableTicks = 0; missTicks = 0;
   }
 
   document.addEventListener('visibilitychange', () => {
@@ -445,18 +445,22 @@
     const diag = Math.hypot(DET_W, detH);
 
     if (!quad){
-      liveTrackSvg.innerHTML = '';
-      prevQuad = null; stableTicks = 0;
+      missTicks++;
+      if (missTicks > 1){ // allow a single flickered frame without losing progress
+        liveTrackSvg.innerHTML = '';
+        prevQuad = null; stableTicks = 0;
+      }
       el('camStatus').textContent = '카메라를 문서 위에 맞춰주세요';
       return;
     }
+    missTicks = 0;
 
     const order = ['tl','tr','br','bl'];
     let moved = 0;
     if (prevQuad){
       moved = order.reduce((s,k) => s + Math.hypot(quad[k].x-prevQuad[k].x, quad[k].y-prevQuad[k].y), 0) / 4;
     }
-    const isStableFrame = prevQuad && (moved / diag) < 0.02;
+    const isStableFrame = prevQuad && (moved / diag) < 0.05;
     stableTicks = isStableFrame ? stableTicks + 1 : 1;
     prevQuad = quad;
 
@@ -468,7 +472,7 @@
     el('camStatus').textContent = stableTicks >= 2 ? '문서 고정 중…' : '문서를 감지했어요';
 
     if (autoCaptureEnabled && stableTicks >= 3){
-      stableTicks = 0; prevQuad = null;
+      stableTicks = 0; prevQuad = null; missTicks = 0;
       el('camStatus').textContent = '촬영!';
       doCapture();
     }
