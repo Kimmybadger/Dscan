@@ -251,7 +251,7 @@
   async function startCamera(){
     try{
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width:{ideal:1920}, height:{ideal:1080} },
+        video: { facingMode: { ideal: 'environment' }, width:{ideal:4096}, height:{ideal:2160} },
         audio:false
       });
       video.srcObject = stream;
@@ -262,11 +262,32 @@
   startCamera();
 
   // ---------- capture ----------
-  el('shutterBtn').addEventListener('click', () => {
-    if (!video.videoWidth) return;
-    const c = document.createElement('canvas');
-    c.width = video.videoWidth; c.height = video.videoHeight;
-    c.getContext('2d').drawImage(video, 0, 0);
+  el('shutterBtn').addEventListener('click', async () => {
+    let c = null;
+
+    // Prefer a full-resolution still photo (usually much sharper than the
+    // live video frame) where the browser supports it.
+    const track = stream && stream.getVideoTracks()[0];
+    if (track && 'ImageCapture' in window) {
+      try {
+        const capture = new ImageCapture(track);
+        const blob = await capture.takePhoto();
+        const bitmap = await createImageBitmap(blob);
+        c = document.createElement('canvas');
+        c.width = bitmap.width; c.height = bitmap.height;
+        c.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close && bitmap.close();
+      } catch (e) { c = null; }
+    }
+
+    // Fallback: grab the current video frame (works everywhere, including iOS Safari).
+    if (!c) {
+      if (!video.videoWidth) return;
+      c = document.createElement('canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext('2d').drawImage(video, 0, 0);
+    }
+
     rawCanvas = c;
     enterReview();
   });
