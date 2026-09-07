@@ -83,12 +83,6 @@
     display:flex; flex-direction:column; align-items:center; gap:8px;
   }
   #camStatus{font-size:13px; color:var(--ink-dim); letter-spacing:0.2px; text-align:center;}
-  #autoToggle{
-    font-family:var(--font-display); font-size:13px; font-weight:600;
-    padding:5px 12px; border-radius:var(--radius);
-    border:1px solid var(--line); color:var(--ink-dim);
-  }
-  #autoToggle.active{color:var(--accent-ink); background:var(--accent); border-color:var(--accent);}
 
   /* ---- Review / crop view ---- */
   #reviewView{position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:#000; overflow:hidden; touch-action:none;}
@@ -199,7 +193,6 @@
     <div class="viewfinder"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
     <div id="camStatusRow">
       <span id="camStatus">카메라를 문서 위에 맞춰주세요</span>
-      <button id="autoToggle" class="active">자동 촬영 켬</button>
     </div>
   </div>
 
@@ -256,10 +249,9 @@
   let cvReady = false;
   let dragIndex = null;
 
-  // live tracking / auto-capture
-  let autoCaptureEnabled = true;
+  // live tracking (visual guide only — auto-capture removed for image quality)
   let trackTimer = null;
-  let prevQuad = null, stableTicks = 0, missTicks = 0, autoRetries = 0;
+  let prevQuad = null, stableTicks = 0, missTicks = 0;
   let capturing = false;
   const DET_W = 320;
 
@@ -268,7 +260,7 @@
   const camFooter = el('camFooter'), reviewFooter = el('reviewFooter');
   const filterRow = el('filterRow'), filmstrip = el('filmstrip');
   const video = el('video'), reviewImg = el('reviewImg'), cropSvg = el('cropSvg');
-  const liveTrackSvg = el('liveTrackSvg'), autoToggle = el('autoToggle');
+  const liveTrackSvg = el('liveTrackSvg');
   const loupe = el('loupe'), loupeCanvas = el('loupeCanvas');
 
   const pageCountEl = el('pageCount');
@@ -316,25 +308,28 @@
     }
   }
 
-  autoToggle.addEventListener('click', () => {
-    autoCaptureEnabled = !autoCaptureEnabled;
-    autoToggle.classList.toggle('active', autoCaptureEnabled);
-    autoToggle.textContent = autoCaptureEnabled ? '자동 촬영 켬' : '자동 촬영 끔';
-  });
-
   // ---------- capture ----------
-  async function doCapture(auto = false){
+  async function doCapture(){
     if (capturing) return;
     capturing = true;
     let c = null;
 
     // Prefer a full-resolution still photo (usually much sharper than the
-    // live video frame) where the browser supports it.
+    // live video frame) where the browser supports it — and explicitly ask
+    // for the sensor's maximum still-photo resolution, since some browsers
+    // otherwise default takePhoto() to a lower "video-adjacent" size.
     const track = stream && stream.getVideoTracks()[0];
     if (track && 'ImageCapture' in window) {
       try {
         const capture = new ImageCapture(track);
-        const blob = await capture.takePhoto();
+        let photoSettings = {};
+        try {
+          const caps = await capture.getPhotoCapabilities();
+          if (caps.imageWidth && caps.imageHeight) {
+            photoSettings = { imageWidth: caps.imageWidth.max, imageHeight: caps.imageHeight.max };
+          }
+        } catch (e) { /* capability probing not supported — takePhoto() with no args is still fine */ }
+        const blob = await capture.takePhoto(photoSettings);
         const bitmap = await createImageBitmap(blob);
         c = document.createElement('canvas');
         c.width = bitmap.width; c.height = bitmap.height;
@@ -351,13 +346,15 @@
       c.getContext('2d').drawImage(video, 0, 0);
     }
 
-    // Cap processing resolution: modern iPhone sensors (12MP+) are far more
-    // than OpenCV's perspective-warp + flat-fielding steps need, and keeping
-    // several huge float32 Mats alive at once causes iOS Safari to silently
-    // purge large canvas backing stores — which is what makes the loupe and
-    // the saved PDF turn solid black. 2400px on the long edge is still very
-    // sharp for reading documents while staying well within safe memory.
-    const MAX_DIM = 2400;
+    // Cap processing resolution: several full-resolution float32 Mats alive
+    // at once (perspective warp + flat-fielding) can push iOS Safari into
+    // purging large canvas backing stores, which is what previously turned
+    // the loupe and the saved PDF solid black. 3000px on the long edge is a
+    // good sharpness/safety balance now that flat-fielding runs its blur
+    // pass on a downsampled copy instead of the full-size image (see
+    // flattenIllumination) — raise further only if you've confirmed on
+    // your own device that memory holds up.
+    const MAX_DIM = 3000;
     if (Math.max(c.width, c.height) > MAX_DIM) {
       const scale = MAX_DIM / Math.max(c.width, c.height);
       const scaled = document.createElement('canvas');
@@ -367,24 +364,15 @@
       c = scaled;
     }
 
-    if (auto && cvReady && sharpnessScore(c) < SHARPNESS_MIN && autoRetries < AUTO_RETRY_MAX){
-      // The shot came out blurry and we haven't given up yet — discard it
-      // and let live tracking pick back up so it can try again once the
-      // camera actually settles, instead of handing the user a soft photo.
-      autoRetries++;
-      capturing = false;
-      stableTicks = 4; // don't make them hold it fully still all over again
-      el('camStatus').textContent = '초점이 흐려서 다시 시도할게요…';
-      return;
-    }
-
-    autoRetries = 0;
     rawCanvas = c;
     enterReview();
+    if (cvReady && sharpnessScore(c) < SHARPNESS_MIN) {
+      toast('사진이 흐릿해 보여요 — 다시 찍는 걸 권장해요');
+    }
     capturing = false;
   }
 
-  el('shutterBtn').addEventListener('click', () => doCapture(false));
+  el('shutterBtn').addEventListener('click', () => doCapture());
 
   function enterReview(){
     stopLiveTracking();
@@ -435,7 +423,7 @@
 
   function startLiveTracking(){
     if (trackTimer) return;
-    prevQuad = null; stableTicks = 0; missTicks = 0; autoRetries = 0;
+    prevQuad = null; stableTicks = 0; missTicks = 0;
     trackTimer = setInterval(trackTick, 260);
   }
 
@@ -443,7 +431,7 @@
     clearInterval(trackTimer);
     trackTimer = null;
     liveTrackSvg.innerHTML = '';
-    prevQuad = null; stableTicks = 0; missTicks = 0; autoRetries = 0;
+    prevQuad = null; stableTicks = 0; missTicks = 0;
   }
 
   document.addEventListener('visibilitychange', () => {
@@ -498,13 +486,7 @@
     const locking = stableTicks >= 2 ? 'locking' : '';
     liveTrackSvg.innerHTML = `<polygon class="${locking}" points="${pts}"></polygon>`;
 
-    el('camStatus').textContent = stableTicks >= 2 ? '문서 고정 중…' : '문서를 감지했어요';
-
-    if (autoCaptureEnabled && stableTicks >= 6){
-      stableTicks = 0; prevQuad = null; missTicks = 0;
-      el('camStatus').textContent = '촬영!';
-      doCapture(true);
-    }
+    el('camStatus').textContent = stableTicks >= 2 ? '문서를 인식했어요 — 버튼을 눌러 촬영하세요' : '문서를 감지했어요';
   }
 
   el('retakeBtn').addEventListener('click', exitReviewToCamera);
@@ -610,7 +592,6 @@
   // Tune this if needed: raise it if blurry shots still get accepted, lower
   // it if sharp shots keep getting rejected/retried.
   const SHARPNESS_MIN = 40;
-  const AUTO_RETRY_MAX = 2;
 
   // ---------- auto edge detection ----------
   function rotatedRectCorners(rect){
@@ -725,10 +706,24 @@
   // blurred estimate of its own background illumination ("flat-fielding") —
   // this is what makes a shadowed corner of a page look evenly lit.
   function flattenIllumination(gray){
+    // Estimate the smooth background illumination on a small downsampled
+    // copy — shadows/light falloff are inherently low-frequency, so this
+    // loses no real detail — then upsample that correction map back to
+    // full resolution instead of running the (expensive, wide-kernel) blur
+    // directly on the full-size image. Cheaper and lighter on memory,
+    // which is what lets us safely process higher-resolution photos.
+    const DS = 500;
+    const scale = DS / Math.max(gray.cols, gray.rows);
+    const small = new cv.Mat();
+    cv.resize(gray, small, new cv.Size(Math.round(gray.cols*scale), Math.round(gray.rows*scale)), 0, 0, cv.INTER_AREA);
+
+    const bgSmall = new cv.Mat();
+    let k = Math.round(Math.min(small.cols, small.rows) / 4);
+    if (k < 15) k = 15; if (k % 2 === 0) k++;
+    cv.GaussianBlur(small, bgSmall, new cv.Size(k, k), 0);
+
     const bg = new cv.Mat();
-    let k = Math.round(Math.min(gray.cols, gray.rows) / 8);
-    if (k < 25) k = 25; if (k > 151) k = 151; if (k % 2 === 0) k++;
-    cv.GaussianBlur(gray, bg, new cv.Size(k, k), 0);
+    cv.resize(bgSmall, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
 
     const grayF = new cv.Mat(), bgF = new cv.Mat(), normF = new cv.Mat(), out = new cv.Mat();
     gray.convertTo(grayF, cv.CV_32F);
@@ -736,7 +731,8 @@
     cv.divide(grayF, bgF, normF, 255);
     normF.convertTo(out, cv.CV_8U);
 
-    bg.delete(); grayF.delete(); bgF.delete(); normF.delete();
+    small.delete(); bgSmall.delete(); bg.delete();
+    grayF.delete(); bgF.delete(); normF.delete();
     return out; // caller must delete
   }
 
@@ -815,7 +811,7 @@
     pages.forEach((p, i) => {
       if (i>0) pdf.addPage();
       const c = p.full;
-      const imgData = c.toDataURL('image/jpeg', 0.85);
+      const imgData = c.toDataURL('image/jpeg', 0.93);
       const pageW = pdf.internal.pageSize.getWidth(), pageH = pdf.internal.pageSize.getHeight();
       const margin = 18;
       const maxW = pageW - margin*2, maxH = pageH - margin*2;
