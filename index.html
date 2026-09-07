@@ -261,7 +261,7 @@
   let trackTimer = null;
   let prevQuad = null, stableTicks = 0, missTicks = 0;
   let capturing = false;
-  const DET_W = 240;
+  const DET_W = 320;
 
   const el = id => document.getElementById(id);
   const cameraView = el('cameraView'), reviewView = el('reviewView'), reviewStage = el('reviewStage');
@@ -571,7 +571,7 @@
 
     if (!quad){
       missTicks++;
-      if (missTicks > 1){ // allow a single flickered frame without losing progress
+      if (missTicks > 2){ // allow a couple of flickered frames without losing progress
         liveTrackSvg.innerHTML = '';
         prevQuad = null; stableTicks = 0;
       }
@@ -620,10 +620,14 @@
   }
 
   function svgPoint(evt){
-    const pt = cropSvg.createSVGPoint();
-    pt.x = evt.clientX; pt.y = evt.clientY;
-    const ctm = cropSvg.getScreenCTM().inverse();
-    return pt.matrixTransform(ctm);
+    // getBoundingClientRect reflects the actual on-screen box, including any
+    // CSS transform from pinch-zoom/pan — unlike getScreenCTM(), which iOS
+    // Safari fails to keep in sync with ancestor CSS transforms, causing the
+    // corner handle to jump wildly once the image is zoomed in.
+    const rect = cropSvg.getBoundingClientRect();
+    const relX = (evt.clientX - rect.left) / rect.width;
+    const relY = (evt.clientY - rect.top) / rect.height;
+    return { x: relX * rawCanvas.width, y: relY * rawCanvas.height };
   }
 
   // ---------- magnifier loupe (shown while dragging a corner handle) ----------
@@ -674,6 +678,17 @@
   }
 
   // ---------- auto edge detection ----------
+  function rotatedRectCorners(rect){
+    const rad = rect.angle * Math.PI / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const w = rect.size.width / 2, h = rect.size.height / 2;
+    const cx = rect.center.x, cy = rect.center.y;
+    return [{x:-w,y:-h},{x:w,y:-h},{x:w,y:h},{x:-w,y:h}].map(p => ({
+      x: cx + p.x*cos - p.y*sin,
+      y: cy + p.x*sin + p.y*cos
+    }));
+  }
+
   function detectDocument(canvas){
     try{
       const src = cv.imread(canvas);
@@ -690,22 +705,42 @@
 
       const imgArea = canvas.width * canvas.height;
       let best = null, bestArea = 0;
+      let largestCnt = null, largestArea = 0; // fallback candidate: biggest big-enough blob, any shape
+
       for (let i=0;i<contours.size();i++){
         const cnt = contours.get(i);
         const area = cv.contourArea(cnt);
-        if (area > imgArea*0.15 && area > bestArea){
-          const peri = cv.arcLength(cnt, true);
-          const approx = new cv.Mat();
-          cv.approxPolyDP(cnt, approx, 0.02*peri, true);
-          if (approx.rows === 4){
-            bestArea = area;
-            best = [];
-            for (let j=0;j<4;j++) best.push({x: approx.data32S[j*2], y: approx.data32S[j*2+1]});
+        if (area > imgArea*0.15){
+          if (area > largestArea){
+            largestArea = area;
+            if (largestCnt) largestCnt.delete();
+            largestCnt = cnt.clone();
           }
-          approx.delete();
+          if (area > bestArea){
+            const peri = cv.arcLength(cnt, true);
+            const approx = new cv.Mat();
+            cv.approxPolyDP(cnt, approx, 0.02*peri, true);
+            if (approx.rows === 4){
+              bestArea = area;
+              best = [];
+              for (let j=0;j<4;j++) best.push({x: approx.data32S[j*2], y: approx.data32S[j*2+1]});
+            }
+            approx.delete();
+          }
         }
         cnt.delete();
       }
+
+      // Fallback: a clean 4-corner shape wasn't found, but a large blob was —
+      // use its rotated bounding box instead of giving up on the frame. Less
+      // precise on odd-shaped clutter, but keeps live tracking from flickering
+      // in and out on every frame that isn't a perfect quadrilateral.
+      if (!best && largestCnt){
+        const rect = cv.minAreaRect(largestCnt);
+        best = rotatedRectCorners(rect);
+      }
+      if (largestCnt) largestCnt.delete();
+
       src.delete(); gray.delete(); blurred.delete(); edged.delete();
       kernel.delete(); contours.delete(); hierarchy.delete();
 
